@@ -13,8 +13,11 @@
 package org.cloudfoundry.identity.uaa.scim.endpoints;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import org.cloudfoundry.identity.uaa.authentication.Origin;
 import org.cloudfoundry.identity.uaa.codestore.ExpiringCode;
 import org.cloudfoundry.identity.uaa.codestore.ExpiringCodeStore;
+import org.cloudfoundry.identity.uaa.codestore.ExpiringCodeType;
+import org.cloudfoundry.identity.uaa.codestore.JdbcExpiringCodeStore;
 import org.cloudfoundry.identity.uaa.mock.InjectedMockContextTest;
 import org.cloudfoundry.identity.uaa.mock.util.MockMvcUtils;
 import org.cloudfoundry.identity.uaa.scim.ScimUser;
@@ -31,7 +34,9 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
@@ -61,6 +66,11 @@ public class PasswordResetEndpointMockMvcTests extends InjectedMockContextTest {
 
     @Test
     public void changePassword_SuccessfulFlow_PasswordChanged() throws Exception {
+
+        MockMvcUtils.PredictableGenerator generator = new MockMvcUtils.PredictableGenerator();
+        JdbcExpiringCodeStore store = getWebApplicationContext().getBean(JdbcExpiringCodeStore.class);
+        store.setGenerator(generator);
+
         String code = getExpiringCode(null, null);
         MockHttpServletRequestBuilder post = post("/password_change")
                 .header("Authorization", "Bearer " + loginToken)
@@ -71,7 +81,15 @@ public class PasswordResetEndpointMockMvcTests extends InjectedMockContextTest {
         getMockMvc().perform(post)
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.user_id").exists())
-                .andExpect(jsonPath("$.username").value(user.getUserName()));
+                .andExpect(jsonPath("$.username").value(user.getUserName()))
+                .andExpect(jsonPath("$.code").value("test" + generator.counter.get()));
+
+        ExpiringCode expiringCode = store.retrieveCode("test" + generator.counter.get());
+        Map<String,String> data = JsonUtils.readValue(expiringCode.getData(), new TypeReference<Map<String,String>>() {});
+        assertThat(data.get("user_id"), is(user.getId()));
+        assertThat(data.get("username"), is(user.getUserName()));
+        assertThat(data.get(Origin.ORIGIN), is(Origin.UAA));
+        assertThat(data.get("action"), is(ExpiringCodeType.AUTOLOGIN.name()));
     }
 
     @Test

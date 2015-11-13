@@ -13,15 +13,20 @@
 
 package org.cloudfoundry.identity.uaa.login;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.cloudfoundry.identity.uaa.authentication.AuthzAuthenticationRequest;
 import org.cloudfoundry.identity.uaa.authentication.Origin;
+import org.cloudfoundry.identity.uaa.authentication.UaaAuthentication;
 import org.cloudfoundry.identity.uaa.authentication.UaaAuthenticationDetails;
 import org.cloudfoundry.identity.uaa.authentication.UaaPrincipal;
 import org.cloudfoundry.identity.uaa.client.SocialClientUserDetails;
 import org.cloudfoundry.identity.uaa.codestore.ExpiringCode;
 import org.cloudfoundry.identity.uaa.codestore.ExpiringCodeStore;
+import org.cloudfoundry.identity.uaa.codestore.ExpiringCodeType;
+import org.cloudfoundry.identity.uaa.error.InvalidCodeException;
+import org.cloudfoundry.identity.uaa.user.UaaAuthority;
 import org.cloudfoundry.identity.uaa.util.JsonUtils;
 import org.cloudfoundry.identity.uaa.zone.IdentityZoneHolder;
 import org.springframework.security.authentication.AuthenticationManager;
@@ -43,10 +48,6 @@ public class AutologinAuthenticationManager implements AuthenticationManager {
 
     private ExpiringCodeStore codeStore;
 
-    public ExpiringCodeStore getExpiringCodeStore() {
-        return codeStore;
-    }
-
     public void setExpiringCodeStore(ExpiringCodeStore expiringCodeStore) {
         this.codeStore= expiringCodeStore;
     }
@@ -66,52 +67,33 @@ public class AutologinAuthenticationManager implements AuthenticationManager {
         Map<String, String> info = request.getInfo();
         String code = info.get("code");
 
-        ExpiringCode ec = doRetrieveCode(code);
-        SocialClientUserDetails user = null;
+        ExpiringCode expiringCode = doRetrieveCode(code);
+        Map<String,String> codeData = null;
         try {
-            if (ec != null) {
-                user = JsonUtils.readValue(ec.getData(), SocialClientUserDetails.class);
+            if (expiringCode == null) {
+                logger.debug("Autologin code has expired");
+                throw new InvalidCodeException("expired_code", "Expired code", 422);
+            }
+            codeData = JsonUtils.readValue(expiringCode.getData(), new TypeReference<Map<String,String>>() {});
+            if(codeData.get("action") == null || !codeData.get("action").equals(ExpiringCodeType.AUTOLOGIN.name())) {
+                logger.debug("Code is not meant for autologin");
+                throw new InvalidCodeException("invalid_code", "Not an autologin code", 422);
             }
         } catch (JsonUtils.JsonUtilException x) {
             throw new BadCredentialsException("JsonConversion error", x);
         }
 
-        if (user == null) {
-            throw new BadCredentialsException("Cannot redeem provided code for user");
-        }
+        String origin;
+        String userId;
+        String username;
+        username = codeData.get("username");
+        origin = codeData.get(Origin.ORIGIN);
+        userId = codeData.get("user_id");
+        UaaPrincipal principal = new UaaPrincipal(userId,username,null,origin,null, IdentityZoneHolder.get().getId());
 
-        // ensure that we stored clientId
-        String clientId = null;
-        String origin = null;
-        String userId = null;
-        Object principal = user.getUsername();
-        if (user.getDetails() instanceof String) {
-            clientId = (String) user.getDetails();
-        } else if (user.getDetails() instanceof Map) {
-            Map<String,String> map = (Map<String,String>)user.getDetails();
-            clientId = map.get("client_id");
-            origin = map.get(Origin.ORIGIN);
-            userId = map.get("user_id");
-            principal = new UaaPrincipal(userId,user.getUsername(),null,origin,null, IdentityZoneHolder.get().getId());
-        }
-        if (clientId == null) {
-            throw new BadCredentialsException("Cannot redeem provided code for user, client id missing");
-        }
-
-        // validate the client Id
-        if (!(authentication.getDetails() instanceof UaaAuthenticationDetails)) {
-            throw new BadCredentialsException("Cannot redeem provided code for user, auth details missing");
-        }
-
-        UaaAuthenticationDetails details = (UaaAuthenticationDetails) authentication.getDetails();
-        if (!clientId.equals(details.getClientId())) {
-            throw new BadCredentialsException("Cannot redeem provided code for user, client mismatch");
-        }
-
-        UsernamePasswordAuthenticationToken result = new UsernamePasswordAuthenticationToken(principal, null, user.getAuthorities());
-        result.setDetails(authentication.getDetails());
-        return result;
-
+        return new UaaAuthentication(
+                principal,
+                UaaAuthority.USER_AUTHORITIES,
+                (UaaAuthenticationDetails) authentication.getDetails());
     }
-
 }
